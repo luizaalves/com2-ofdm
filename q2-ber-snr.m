@@ -1,3 +1,4 @@
+%não está funcionando
 close all;
 clear all;
 clc;
