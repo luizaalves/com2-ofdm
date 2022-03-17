@@ -1,68 +1,90 @@
-%NÃO FUNCIONOU
-modOrder = 4;  % for 16-QAM
-bitsPerSymbol = log2(modOrder)  % modOrder = 2^bitsPerSymbol
-nFFT=64;
-numCarr = 48;  % number of subcarriers
-cycPrefLen = 16;  % cyclic prefix length
-mpChan = [0.8; zeros(7,1); -0.5; zeros(7,1); 0.34];  % multipath channel
-SNR = 15;
-%SNR = [-5:5:50]; % bit to noise ratio
-%SNR      = SNR + 10*log10(numCarr/nFFT) + 10*log10(nFFT/(nFFT+cycPrefLen)) % converting to symbol to noise ratio   % dB, signal-to-noise ratio of AWGN
+close all;
+clear all;
+clc;
+
+%%
+M = 4; % Q-PSK
 
 nIteracoes = 10^3; 
 
-numGBCarr = numCarr/16
-gbLeft = 1:numGBCarr 
-gbRight = (numCarr-numGBCarr+1):numCarr
-dcIdx = (numCarr/2)+1
-nullIdx = [gbLeft dcIdx gbRight]'
-numDataCarr = numCarr - length(nullIdx)
-numBits = numDataCarr*bitsPerSymbol;
+nFFT        = 64;       % fft size
+nDSC        = 48;       % number of data subcarriers
+nSym        = 10^1;     % number of symbols per transmission
+nPilot      = 4;        % number of pilot subcarriers
+nPrefix     = 16;       % cyclic prefix
 
-srcBits = randi([0,1],numBits,1);
-mod = comm.PSKModulator(modOrder,'BitInput',true);
-qpskmod= step(mod,srcBits);
-ofdmmod = comm.OFDMModulator('FFTLength',64, ...
+EbN0dB      = [-5:5:50]; % bit to noise ratio
+EsN0dB      = EbN0dB + 10*log10(nDSC/nFFT) + 10*log10(nFFT/(nFFT+nPrefix)); % converting to symbol to noise ratio
+
+BER = zeros(length(M),length(EbN0dB));
+BER_M = zeros(length(M),length(EbN0dB));
+
+
+    
+nBitPerSym  = log2(M)*nDSC; % number of bits per OFDM symbol (same as the number of subcarriers for BPSK)
+
+
+mod = comm.QPSKModulator;
+demod = comm.QPSKDemodulator;
+
+ofdmMod = comm.OFDMModulator('FFTLength',64, ...
     'PilotInputPort',true, ...
     'InsertDCNull',true, ...
     'CyclicPrefixLength',16, ...
     'NumSymbols', 10^1, ...
     'NumTransmitAntennas',2);
-ofdmdemod = comm.OFDMDemodulator('FFTLength',64,'CyclicPrefixLength',16);
+ofdmDemod = comm.OFDMDemodulator(ofdmMod);
+ofdmDemod.NumReceiveAntennas = 2;
+ofdmModDim = info(ofdmMod);
 
-ofdmModOut = ofdmmod(qpskmod);
+numData = ofdmModDim.DataInputSize(1);   % Number of data subcarriers
+numSym = ofdmModDim.DataInputSize(2);    % Number of OFDM symbols
+numTxAnt = ofdmModDim.DataInputSize(3);  % Number of transmit antennas
+nframes = 100;
+data = randi([0 3],nframes*numData,numSym,numTxAnt);
+modData = mod(data(:));
+modData = reshape(modData,nframes*numData,numSym,numTxAnt);
 
-for ni = 1:length(SNR)
-    for nInter = 1:nIteracoes
-        mpChanOut = filter(mpChan,1,ofdmModOut);
-        chanOut = awgn(mpChanOut,SNR(ni));
+for k = 1:nframes
 
-        ofdmDemodOut = ofdmdemod(chanOut,numCarr,cycPrefLen,cycPrefLen,nullIdx);
+     % Find row indices for kth OFDM frame
+    indData = (k-1)*ofdmModDim.DataInputSize(1)+1:k*numData;
+
+    % Generate random OFDM pilot symbols
+    pilotData = complex(rand(ofdmModDim.PilotInputSize), ...
+        rand(ofdmModDim.PilotInputSize));
+
+    % Modulate QPSK symbols using OFDM
+    dataOFDM = ofdmMod(modData(indData,:,:),pilotData);
+    
+    
+    
+    %% Channel    
+    for ni = 1:length(EbN0dB)
+        for nInter = 1:nIteracoes
+
+            % AWGN Channel
+            Y = awgn(dataOFDM,EbN0dB(ni));
+
+%% Receiver            
+        % Conversao Serie-Paralelo
+        R = reshape(Y,(nFFT+nPrefix),nSym,2);
+
+        % OFDM Receiver
+        % Remove the cyclic prefix
+        yMod =  ofdmDemod(dataOFDM);
+
+        % Q-PSK Demodulation
+        yDemod = demod(yMod(:));
+
         
-        mpChanFreq = fftshift(fft(mpChan,numCarr));
-        mpChanFreq(nullIdx) = [];
-        eqOut = ofdmDemodOut ./ mpChanFreq;
-        scatterplot(eqOut)
-        title('Frequency Domain Equalizer Output')
-
-        demod = comm.PSKDemodulator(modOrder,'BitOutput',true);
-        qpskdDemodOut=demod(eqOut);
-
-        indBER = find(srcBits ~= qpskdDemodOut);
+        indBER = find(data ~= yDemod);
         Ber_M = length(indBER);
 
-        Ber_M(1,ni) = Ber_M(1,ni) + Ber_M;
-
+        BER_M(1,ni) = BER_M(1,ni) + Ber_M;
+        end
     end
-  BER(1,ni) = BER_M(1,ni)/(2*numBits*nIteracoes) 
-end
 
-close all; 
-figure
-semilogy(EbN0dB,BER(1,:),'bx-','LineWidth',2);
-hold on;
-grid on
-xlabel('SNR, dB')
-ylabel('Bit Error Rate')
-title('BER for Q-PSK using OFDM')
-legend('QPSK','Location','southwest');
+    BER(1,ni) = BER_M(1,ni)/(2*nSym*nBitPerSym*nIteracoes) 
+
+end
